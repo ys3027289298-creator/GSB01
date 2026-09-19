@@ -1,0 +1,22 @@
+{
+  "name": "fps-sensitivity-lab",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "浏览器端 FPS 射击灵敏度检测系统",
+  "scripts": {
+    "dev": "vite --open",
+    "build": "vite build",
+    "preview": "vite preview --open",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "build": "vite build",
+    "e2e": "playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.49.0",
+    "jsdom": "^25.0.1",
+    "vite": "^6.0.0",
+    "vitest": "^2.1.0"
+  }
+}
