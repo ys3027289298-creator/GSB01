@@ -30,21 +30,21 @@ export class ClickTest {
     this.over = false;
   }
 
-  spawnTarget(ts) {
+  spawnTarget(slotTs) {
     const margin = this.radius + 12;
     const target = {
       id: this.spawned + 1,
       x: this.rng.range(margin, Math.max(margin + 1, this.width - margin)),
       y: this.rng.range(margin + 40, Math.max(margin + 41, this.height - margin)),
       r: this.radius,
-      bornAt: ts,
-      expiresAt: ts + CLICK_LIFETIME,
+      bornAt: slotTs,
+      expiresAt: slotTs + CLICK_LIFETIME,
       hit: false
     };
     this.targets.push(target);
     this.spawned += 1;
     const gap = this.diff.spawnGap * (0.7 + this.rng.next() * 0.6);
-    this.nextSpawnAt = ts + gap;
+    this.nextSpawnAt = slotTs + gap;
     return target;
   }
 
@@ -54,26 +54,29 @@ export class ClickTest {
     return this.startedAt;
   }
 
-  tick(ts) {
-    if (this.startedAt == null || this.over) return { events: [] };
-    this.elapsed = ts - this.startedAt;
+  _advanceTo(ts) {
     const events = [];
-    const before = this.targets.length;
-    while (this.elapsed >= this.nextSpawnAt && this.elapsed < this.durationMs) {
-      events.push({ type: 'spawn', target: this.spawnTarget(this.elapsed) });
-    }
-    const alive = [];
-    for (const t of this.targets) {
-      if (t.hit) continue;
-      if (this.elapsed >= t.expiresAt) {
+    if (this.startedAt == null || this.over) return events;
+    this.elapsed = Math.max(this.elapsed, ts - this.startedAt);
+    const elapsed = this.elapsed;
+    for (;;) {
+      let expiring = null;
+      for (const t of this.targets) {
+        if (!expiring || t.expiresAt < expiring.expiresAt) expiring = t;
+      }
+      const canSpawn = this.nextSpawnAt <= elapsed && this.nextSpawnAt < this.durationMs;
+      const canExpire = expiring != null && expiring.expiresAt <= elapsed;
+      if (canExpire && (!canSpawn || expiring.expiresAt <= this.nextSpawnAt)) {
+        this.targets = this.targets.filter((t) => t !== expiring);
         this.timeouts += 1;
-        events.push({ type: 'timeout', target: t });
+        events.push({ type: 'timeout', target: expiring });
+      } else if (canSpawn) {
+        events.push({ type: 'spawn', target: this.spawnTarget(this.nextSpawnAt) });
       } else {
-        alive.push(t);
+        break;
       }
     }
-    this.targets = alive;
-    if (this.elapsed >= this.durationMs) {
+    if (elapsed >= this.durationMs) {
       this.over = true;
       for (const t of this.targets) {
         this.timeouts += t.hit ? 0 : 1;
@@ -81,18 +84,27 @@ export class ClickTest {
       this.targets = [];
       events.push({ type: 'end' });
     }
+    return events;
+  }
+
+  tick(ts) {
+    if (this.startedAt == null || this.over) return { events: [] };
+    const before = this.targets.length;
+    const events = this._advanceTo(ts);
     return { events, before, spawned: this.spawned };
   }
 
-  handleClick(x, y) {
-    if (this.over || this.startedAt == null) return null;
+  handleClick(x, y, ts) {
+    if (this.startedAt == null) return null;
+    if (Number.isFinite(ts)) this._advanceTo(ts);
+    if (this.over) return null;
     const sorted = [...this.targets].sort((a, b) => a.bornAt - b.bornAt);
     for (const target of sorted) {
       if (pointInCircle(x, y, target.x, target.y, target.r)) {
         target.hit = true;
         this.targets = this.targets.filter((t) => t !== target);
         this.hits += 1;
-        const reaction = this.elapsed - target.bornAt;
+        const reaction = Math.min(CLICK_LIFETIME, Math.max(0, this.elapsed - target.bornAt));
         this.reactionTimes.push(reaction);
         return { hit: true, target, reactionMs: reaction };
       }

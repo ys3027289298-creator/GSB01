@@ -136,16 +136,17 @@ export function testPage(ctx) {
 
   function loop(ts) {
     if (phase !== 'running') return;
-    const engineTs = ts - runStartTs - pausedAccum;
+    const engineTs = ts - pausedAccum;
+    const activeMs = engineTs - runStartTs;
     const dt = ts - lastTs;
     lastTs = ts;
     if (type === 'click') { engine.tick(engineTs); renderClick(); }
     else if (type === 'turn') { engine.tick(engineTs); renderTurn(); }
     else if (type === 'tracking') { engine.tick(engineTs, dt); renderTracking(); }
     else { const st = engine.tick(engineTs, dt); renderRecoil(st); }
-    const remain = Math.max(0, durationMs - engineTs);
+    const remain = Math.max(0, durationMs - activeMs);
     timerEl.textContent = `${(remain / 1000).toFixed(1)} s`;
-    progressBar.style.width = `${Math.min(100, engineTs / durationMs * 100)}%`;
+    progressBar.style.width = `${Math.min(100, activeMs / durationMs * 100)}%`;
     if (engine.over) { finish(); return; }
     rafId = requestAnimationFrame(loop);
   }
@@ -296,7 +297,8 @@ export function testPage(ctx) {
     if (phase !== 'running') return;
     if (type === 'click') {
       const rect = arena.getBoundingClientRect();
-      const result = engine.handleClick(e.clientX - rect.left, e.clientY - rect.top);
+      const engineTs = performance.now() - pausedAccum;
+      const result = engine.handleClick(e.clientX - rect.left, e.clientY - rect.top, engineTs);
       if (result && result.hit) toast(`命中 · 反应 ${Math.round(result.reactionMs)} ms`, 700);
       else if (result) toast('失误：点到空白区域', 600);
     } else if (type === 'turn') {
