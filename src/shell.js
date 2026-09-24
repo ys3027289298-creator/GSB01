@@ -17,7 +17,14 @@ const NAV = [
   ['compare', '灵敏度对比']
 ];
 
+let activePageCleanup = null;
+
 export function renderShell(root, ctx) {
+  if (activePageCleanup) {
+    const cleanup = activePageCleanup;
+    activePageCleanup = null;
+    cleanup();
+  }
   const { store, router } = ctx;
   const { path } = router.route;
   const fullscreenTest = path === 'test';
@@ -53,6 +60,9 @@ export function renderShell(root, ctx) {
   };
   const renderer = pageMap[path] || homePage;
   const content = renderer(pageCtx);
+  if (content && typeof content.dispose === 'function') {
+    activePageCleanup = () => content.dispose();
+  }
   mount(main, content);
 
   const app = h('div', { style: { display: 'contents' } }, [topbar, main]);
