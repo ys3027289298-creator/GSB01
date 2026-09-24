@@ -8,8 +8,11 @@ import { pointInCircle, angleDelta } from '../src/engine/geometry.js';
 import { buildSummary } from '../src/engine/scoring.js';
 import { clampSettings, DEFAULT_SETTINGS } from '../src/engine/settings.js';
 import { makeStorage } from '../src/engine/storage.js';
+import { makeStore } from '../src/state.js';
 
 const baseSettings = { ...DEFAULT_SETTINGS };
+const makeClick = (seed = 'tl', durationSec = 5) =>
+  new ClickTest({ width: 800, height: 600, settings: baseSettings, durationSec, seed, now: () => 0 });
 
 describe('命中判断', () => {
   it('圆内命中、圆外未命中、边界算命中', () => {
@@ -65,6 +68,289 @@ describe('目标生成（快速点击）', () => {
     expect(stats.spawned).toBeGreaterThan(0);
     expect(stats.fastestReactionMs).toBeGreaterThan(0);
     expect(stats.accuracy).toBeCloseTo(t.hits / t.attempts);
+  });
+});
+
+describe('点击引擎时间轴（槽位与跳变）', () => {
+  it('普通 16ms 帧：bornAt 等于槽位时间且严格递增，expiresAt 固定生命周期', () => {
+    const t = makeClick('frames');
+    t.start();
+    const borns = [];
+    for (let ms = 0; ms <= 3000; ms += 16.7) {
+      for (const e of t.tick(ms).events) {
+        if (e.type === 'spawn') {
+          borns.push(e.target.bornAt);
+          expect(e.target.expiresAt - e.target.bornAt).toBe(CLICK_LIFETIME);
+          expect(e.target.bornAt).toBeLessThanOrEqual(ms + 1e-9);
+        }
+      }
+    }
+    expect(borns.length).toBeGreaterThan(1);
+    for (let i = 1; i < borns.length; i++) expect(borns[i]).toBeGreaterThan(borns[i - 1]);
+  });
+
+  it('一次跨一个生成点：补生成目标使用槽位时间而非帧时间', () => {
+    const t = makeClick('jump1');
+    t.start();
+    const slot = t.nextSpawnAt;
+    expect(t.tick(slot - 1).events).toHaveLength(0);
+    const { events } = t.tick(slot + 400);
+    const spawns = events.filter((e) => e.type === 'spawn');
+    expect(spawns).toHaveLength(1);
+    expect(spawns[0].target.bornAt).toBe(slot);
+    expect(spawns[0].target.expiresAt).toBe(slot + CLICK_LIFETIME);
+  });
+
+  it('一次跨多个生成点：按序补齐槽位，已过期目标先 timeout 不复活', () => {
+    const t = makeClick('jumpN', 10);
+    t.start();
+    const { events } = t.tick(4000);
+    const spawns = events.filter((e) => e.type === 'spawn');
+    const timeouts = events.filter((e) => e.type === 'timeout');
+    expect(spawns.length).toBeGreaterThan(2);
+    for (let i = 1; i < spawns.length; i++) {
+      expect(spawns[i].target.bornAt).toBeGreaterThan(spawns[i - 1].target.bornAt);
+    }
+    expect(timeouts.length).toBeGreaterThan(0);
+    for (const e of timeouts) expect(e.target.expiresAt).toBeLessThanOrEqual(4000);
+    for (const alive of t.targets) expect(alive.expiresAt).toBeGreaterThan(4000);
+    expect(t.hits + t.timeouts + t.targets.length).toBe(t.spawned);
+  });
+
+  it('恰好在生成边界：tick 到槽位时间即生成', () => {
+    const t = makeClick('edge-spawn');
+    t.start();
+    const slot = t.nextSpawnAt;
+    const { events } = t.tick(slot);
+    expect(events.some((e) => e.type === 'spawn' && e.target.bornAt === slot)).toBe(true);
+  });
+
+  it('恰好在过期边界：目标结算 timeout，过期点击记失误', () => {
+    const t = makeClick('edge-expire');
+    t.start();
+    t.tick(t.nextSpawnAt);
+    const target = t.targets[0];
+    const expiry = target.expiresAt;
+    const { events } = t.tick(expiry);
+    expect(events.some((e) => e.type === 'timeout' && e.target === target)).toBe(true);
+    expect(t.targets).not.toContain(target);
+    expect(t.timeouts).toBe(1);
+    const res = t.handleClick(target.x, target.y, expiry);
+    expect(res.hit).toBe(false);
+    expect(t.hits).toBe(0);
+    expect(t.reactionTimes).toHaveLength(0);
+    expect(t.timeouts).toBe(1);
+  });
+
+  it('恰好在结束边界：不再生成新目标，end 只出现一次', () => {
+    const t = makeClick('edge-end', 2);
+    t.start();
+    for (let ms = 0; ms < 2000; ms += 100) t.tick(ms);
+    const spawnedBeforeEnd = t.spawned;
+    const first = t.tick(2000);
+    expect(first.events.filter((e) => e.type === 'end')).toHaveLength(1);
+    expect(first.events.some((e) => e.type === 'spawn')).toBe(false);
+    expect(t.over).toBe(true);
+    expect(t.spawned).toBe(spawnedBeforeEnd);
+    expect(t.tick(2100).events).toHaveLength(0);
+    expect(t.tick(2000).events).toHaveLength(0);
+    expect(t.hits + t.timeouts).toBe(t.spawned);
+  });
+
+  it('恢复后点击旧目标：过期目标不得命中，后续 tick 幂等', () => {
+    const t = makeClick('resume', 10);
+    t.start();
+    t.tick(t.nextSpawnAt);
+    const target = t.targets[0];
+    const res = t.handleClick(target.x, target.y, target.expiresAt + 2500);
+    expect(res.hit).toBe(false);
+    expect(t.hits).toBe(0);
+    expect(t.reactionTimes).toHaveLength(0);
+    expect(t.timeouts).toBe(1);
+    // 后续 tick 不得对该目标重复结算 timeout，且同一时间戳重复 tick 幂等
+    const { events } = t.tick(target.expiresAt + 2600);
+    expect(events.filter((e) => e.type === 'timeout' && e.target === target)).toHaveLength(0);
+    const snap = t.getStats();
+    t.tick(target.expiresAt + 2600);
+    expect(t.getStats()).toEqual(snap);
+  });
+
+  it('重复 tick 同一时间戳：不重复生成、不重复 timeout、随机序列不变', () => {
+    const t = makeClick('dup');
+    t.start();
+    t.tick(1000);
+    const snapshot = { spawned: t.spawned, timeouts: t.timeouts, nextSpawnAt: t.nextSpawnAt };
+    const again = t.tick(1000);
+    expect(again.events).toHaveLength(0);
+    expect(t.spawned).toBe(snapshot.spawned);
+    expect(t.timeouts).toBe(snapshot.timeouts);
+    expect(t.nextSpawnAt).toBe(snapshot.nextSpawnAt);
+    t.tick(3000);
+    const back = t.tick(1500);
+    expect(back.events).toHaveLength(0);
+    expect(t.elapsed).toBe(3000);
+  });
+
+  it('重复点击同一目标：第二次按空白失误处理，不重复记命中', () => {
+    const t = makeClick('dup-click');
+    t.start();
+    t.tick(t.nextSpawnAt);
+    const target = t.targets[0];
+    const first = t.handleClick(target.x, target.y, target.bornAt + 300);
+    expect(first.hit).toBe(true);
+    const second = t.handleClick(target.x, target.y, target.bornAt + 320);
+    expect(second.hit).toBe(false);
+    expect(t.hits).toBe(1);
+    expect(t.misses).toBe(1);
+    expect(t.reactionTimes).toHaveLength(1);
+  });
+
+  it('开始前与结束后点击：返回 null 且不污染统计', () => {
+    const t = makeClick('idle-click', 2);
+    expect(t.handleClick(100, 100, 0)).toBeNull();
+    t.start();
+    for (let ms = 0; ms <= 2100; ms += 100) t.tick(ms);
+    expect(t.over).toBe(true);
+    const before = t.getStats();
+    expect(t.handleClick(100, 100, 2200)).toBeNull();
+    expect(t.getStats()).toEqual(before);
+  });
+
+  it('目标终态互斥：每个目标只进入命中或超时之一', () => {
+    const t = makeClick('exclusive', 3);
+    t.start();
+    for (let ms = 0; ms <= 3200; ms += 40) {
+      t.tick(ms);
+      if (t.targets.length && ms % 2000 < 40) {
+        const g = t.targets[0];
+        t.handleClick(g.x, g.y, ms + 10);
+      }
+    }
+    const s = t.getStats();
+    expect(s.hits + s.timeouts).toBe(s.spawned);
+    expect(s.attempts).toBe(s.hits + s.misses);
+    expect(s.hits).toBeGreaterThan(0);
+    expect(s.timeouts).toBeGreaterThan(0);
+  });
+
+  it('事件顺序：表驱动跳跃时间序列下事件时间单调不减', () => {
+    const t = makeClick('order', 8);
+    t.start();
+    const table = [0, 120, 900, 3600, 3616, 7200, 7990, 8000, 8100];
+    const times = [];
+    for (const ms of table) {
+      for (const e of t.tick(ms).events) {
+        if (e.type === 'spawn') times.push(e.target.bornAt);
+        else if (e.type === 'timeout') times.push(e.target.expiresAt);
+        else if (e.type === 'end') times.push(8000);
+      }
+    }
+    expect(times.length).toBeGreaterThan(3);
+    for (let i = 1; i < times.length; i++) {
+      expect(times[i]).toBeGreaterThanOrEqual(times[i - 1]);
+    }
+    expect(times[times.length - 1]).toBe(8000);
+  });
+
+  it('确定性：相同种子与相同时间输入得到相同目标、统计与事件流', () => {
+    const run = () => {
+      const t = makeClick('determ', 4);
+      t.start();
+      const log = [];
+      const table = [0, 500, 500, 2400, 2401, 3900, 4100];
+      for (const ms of table) {
+        for (const e of t.tick(ms).events) {
+          log.push(e.type === 'end' ? 'end' : `${e.type}:${e.target.id}:${Math.round(e.target.x)}:${Math.round(e.target.y)}:${e.target.bornAt}`);
+        }
+        if (t.targets.length) {
+          const g = t.targets[0];
+          const r = t.handleClick(g.x, g.y, ms + 5);
+          log.push(r && r.hit ? `hit:${r.target.id}:${r.reactionMs}` : 'miss');
+        }
+      }
+      return { log, stats: t.getStats() };
+    };
+    const a = run();
+    const b = run();
+    expect(a.log).toEqual(b.log);
+    expect(a.stats).toEqual(b.stats);
+  });
+
+  it('反应时间始终落在 0 到 CLICK_LIFETIME 之间', () => {
+    const t = makeClick('rt-range', 10);
+    t.start();
+    t.tick(t.nextSpawnAt);
+    const g = t.targets[0];
+    const instant = t.handleClick(g.x, g.y, g.bornAt);
+    expect(instant.hit).toBe(true);
+    expect(instant.reactionMs).toBe(0);
+    t.tick(g.bornAt + 100);
+    if (t.targets.length) {
+      const late = t.targets[t.targets.length - 1];
+      const res = t.handleClick(late.x, late.y, late.expiresAt - 1);
+      expect(res.hit).toBe(true);
+      expect(res.reactionMs).toBeGreaterThan(0);
+      expect(res.reactionMs).toBeLessThan(CLICK_LIFETIME);
+    }
+    for (const rt of t.reactionTimes) {
+      expect(rt).toBeGreaterThanOrEqual(0);
+      expect(rt).toBeLessThanOrEqual(CLICK_LIFETIME);
+    }
+  });
+
+  it('统计契约：getStats 幂等，空样本与纯超时样本数值有限', () => {
+    const idle = makeClick('stats-idle', 2);
+    idle.start();
+    for (let ms = 0; ms <= 2100; ms += 50) idle.tick(ms);
+    const s1 = idle.getStats();
+    const s2 = idle.getStats();
+    expect(s1).toEqual(s2);
+    expect(s1.hits).toBe(0);
+    expect(s1.timeouts).toBe(s1.spawned);
+    expect(s1.spawned).toBeGreaterThan(0);
+    for (const k of ['accuracy', 'avgReactionMs', 'medianReactionMs', 'fastestReactionMs', 'mouseDistancePx']) {
+      expect(Number.isFinite(s1[k])).toBe(true);
+    }
+    expect(s1.accuracy).toBe(0);
+    expect(s1.avgReactionMs).toBe(0);
+  });
+
+  it('引擎到页面记录保存：结束只产生一次 end 并保存一条记录', async () => {
+    localStorage.clear();
+    const store = makeStore();
+    await store.init();
+    const t = makeClick('page-reg', 2);
+    t.start();
+    let endEvents = 0;
+    const saveRecord = () => {
+      const stats = t.getStats();
+      store.addRecord({
+        id: `rec_${endEvents}`,
+        createdAt: new Date().toISOString(),
+        type: 'click',
+        profileName: '默认',
+        settings: { ...baseSettings },
+        stats,
+        summary: buildSummary(stats)
+      });
+    };
+    for (let ms = 0; ms <= 2000; ms += 50) {
+      for (const e of t.tick(ms).events) {
+        if (e.type === 'end') { endEvents += 1; saveRecord(); }
+      }
+    }
+    for (let ms = 2050; ms <= 3000; ms += 50) {
+      for (const e of t.tick(ms).events) {
+        if (e.type === 'end') { endEvents += 1; saveRecord(); }
+      }
+    }
+    expect(endEvents).toBe(1);
+    expect(store.state.records).toHaveLength(1);
+    const saved = store.storage.loadRecords();
+    expect(saved).toHaveLength(1);
+    expect(saved[0].stats.spawned).toBe(t.spawned);
+    expect(saved[0].stats.hits + saved[0].stats.timeouts).toBe(t.spawned);
+    expect(saved[0].summary.score).toBeGreaterThanOrEqual(0);
   });
 });
 

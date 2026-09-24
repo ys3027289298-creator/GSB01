@@ -30,6 +30,26 @@ export class ClickTest {
     this.over = false;
   }
 
+  advanceTo(ts) {
+    if (typeof ts === 'number' && Number.isFinite(ts)) {
+      const elapsed = ts - this.startedAt;
+      if (elapsed > this.elapsed) this.elapsed = elapsed;
+    }
+    return this.elapsed;
+  }
+
+  expireDue() {
+    const alive = [];
+    for (const t of this.targets) {
+      if (t.expiresAt <= this.elapsed) {
+        this.timeouts += 1;
+      } else {
+        alive.push(t);
+      }
+    }
+    this.targets = alive;
+  }
+
   spawnTarget(ts) {
     const margin = this.radius + 12;
     const target = {
@@ -56,43 +76,52 @@ export class ClickTest {
 
   tick(ts) {
     if (this.startedAt == null || this.over) return { events: [] };
-    this.elapsed = ts - this.startedAt;
+    this.advanceTo(ts);
     const events = [];
     const before = this.targets.length;
-    while (this.elapsed >= this.nextSpawnAt && this.elapsed < this.durationMs) {
-      events.push({ type: 'spawn', target: this.spawnTarget(this.elapsed) });
-    }
-    const alive = [];
-    for (const t of this.targets) {
-      if (t.hit) continue;
-      if (this.elapsed >= t.expiresAt) {
+    // 按时间顺序合并处理到期的生成槽位与目标过期：
+    // 每个补生成目标使用自己的槽位时间作为 bornAt，
+    // 在当前帧之前就已过期的目标立即结算 timeout，不获得额外生命。
+    for (;;) {
+      let nextExpiry = Infinity;
+      for (const t of this.targets) {
+        if (t.expiresAt < nextExpiry) nextExpiry = t.expiresAt;
+      }
+      const spawnDue = this.nextSpawnAt <= this.elapsed && this.nextSpawnAt < this.durationMs;
+      if (spawnDue && this.nextSpawnAt <= nextExpiry) {
+        events.push({ type: 'spawn', target: this.spawnTarget(this.nextSpawnAt) });
+      } else if (nextExpiry <= this.elapsed) {
+        const idx = this.targets.findIndex((t) => t.expiresAt === nextExpiry);
+        const [expired] = this.targets.splice(idx, 1);
         this.timeouts += 1;
-        events.push({ type: 'timeout', target: t });
+        events.push({ type: 'timeout', target: expired });
       } else {
-        alive.push(t);
+        break;
       }
     }
-    this.targets = alive;
     if (this.elapsed >= this.durationMs) {
       this.over = true;
-      for (const t of this.targets) {
-        this.timeouts += t.hit ? 0 : 1;
-      }
+      this.timeouts += this.targets.length;
       this.targets = [];
       events.push({ type: 'end' });
     }
     return { events, before, spawned: this.spawned };
   }
 
-  handleClick(x, y) {
+  handleClick(x, y, ts) {
     if (this.over || this.startedAt == null) return null;
+    if (ts != null) {
+      // 输入发生时先按同一时间轴补结算过期目标，后续 tick 保持幂等。
+      this.advanceTo(ts);
+      this.expireDue();
+    }
     const sorted = [...this.targets].sort((a, b) => a.bornAt - b.bornAt);
     for (const target of sorted) {
       if (pointInCircle(x, y, target.x, target.y, target.r)) {
         target.hit = true;
         this.targets = this.targets.filter((t) => t !== target);
         this.hits += 1;
-        const reaction = this.elapsed - target.bornAt;
+        const reaction = Math.min(CLICK_LIFETIME, Math.max(0, this.elapsed - target.bornAt));
         this.reactionTimes.push(reaction);
         return { hit: true, target, reactionMs: reaction };
       }

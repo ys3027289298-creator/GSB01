@@ -136,16 +136,19 @@ export function testPage(ctx) {
 
   function loop(ts) {
     if (phase !== 'running') return;
-    const engineTs = ts - runStartTs - pausedAccum;
+    // 引擎时间轴与 performance.now() 同原点，只扣除暂停累计时长，
+    // 暂停期间目标年龄不推进，恢复后也不补算暂停时长。
+    const engineTs = ts - pausedAccum;
     const dt = ts - lastTs;
     lastTs = ts;
     if (type === 'click') { engine.tick(engineTs); renderClick(); }
     else if (type === 'turn') { engine.tick(engineTs); renderTurn(); }
     else if (type === 'tracking') { engine.tick(engineTs, dt); renderTracking(); }
     else { const st = engine.tick(engineTs, dt); renderRecoil(st); }
-    const remain = Math.max(0, durationMs - engineTs);
+    const elapsed = engine.elapsed || 0;
+    const remain = Math.max(0, durationMs - elapsed);
     timerEl.textContent = `${(remain / 1000).toFixed(1)} s`;
-    progressBar.style.width = `${Math.min(100, engineTs / durationMs * 100)}%`;
+    progressBar.style.width = `${Math.min(100, elapsed / durationMs * 100)}%`;
     if (engine.over) { finish(); return; }
     rafId = requestAnimationFrame(loop);
   }
@@ -296,7 +299,11 @@ export function testPage(ctx) {
     if (phase !== 'running') return;
     if (type === 'click') {
       const rect = arena.getBoundingClientRect();
-      const result = engine.handleClick(e.clientX - rect.left, e.clientY - rect.top);
+      const result = engine.handleClick(
+        e.clientX - rect.left,
+        e.clientY - rect.top,
+        performance.now() - pausedAccum
+      );
       if (result && result.hit) toast(`命中 · 反应 ${Math.round(result.reactionMs)} ms`, 700);
       else if (result) toast('失误：点到空白区域', 600);
     } else if (type === 'turn') {
