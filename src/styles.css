@@ -165,3 +165,12 @@ tr:hover td { background: rgba(77,163,255,.05); }
 .calib-row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
 .logline { font-family: ui-monospace, Consolas, monospace; font-size: 13px; color: var(--muted); }
 .locked-hint { position: absolute; top: 12px; left: 50%; transform: translateX(-50%); z-index: 6; background: rgba(0,0,0,.5); padding: 6px 14px; border-radius: 999px; font-size: 13px; color: var(--muted); }
+
+.preview-list {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 4px 18px;
+  margin: 10px 0 14px;
+}
+.preview-list dt { color: var(--muted, #9aa4b2); }
+.preview-list dd { margin: 0; }

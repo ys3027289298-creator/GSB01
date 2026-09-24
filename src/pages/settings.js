@@ -1,6 +1,122 @@
-import { h } from '../dom.js';
-import { toast } from '../dom.js';
+import { h, mount, toast, downloadFile } from '../dom.js';
 import { ASPECTS, DEFAULT_SETTINGS } from '../engine/settings.js';
+import { parseBackup, computePreview, applyImport } from '../engine/backup.js';
+
+const MODE_LABELS = { replace: '替换全部', merge: '合并新增' };
+
+export function backupSection({ store, reload = () => location.reload() }) {
+  let parsed = null;
+  let importing = false;
+
+  const fileInput = h('input', { type: 'file', accept: 'application/json,.json', id: 'backup-file' });
+  const modeSelect = h('select', { id: 'backup-mode' }, [
+    h('option', { value: 'merge', selected: true }, '合并新增（保留当前设置，只加入新记录与方案）'),
+    h('option', { value: 'replace' }, '替换全部（用备份覆盖当前设置、记录和方案）')
+  ]);
+  const previewBox = h('div', { id: 'backup-preview', style: { marginTop: '12px' } });
+  const errorBox = h('div', { id: 'backup-error', style: { marginTop: '12px' } });
+
+  function resetPreview() {
+    parsed = null;
+    mount(previewBox);
+    mount(errorBox);
+  }
+
+  function showError(message) {
+    mount(previewBox);
+    mount(errorBox, h('div', { class: 'danger-banner' }, message));
+  }
+
+  function renderPreview() {
+    if (!parsed) return;
+    const mode = modeSelect.value;
+    const preview = computePreview(parsed.backup, store.state, mode);
+    const rows = [
+      ['文件版本', `v${preview.version}${parsed.migrated ? `（已从旧版本 v${parsed.fromVersion} 迁移）` : ''}`],
+      ['导出时间', preview.exportedAt ? new Date(preview.exportedAt).toLocaleString('zh-CN') : '未知'],
+      ['设置是否变化', preview.settingsChanged ? '有变化' : '无变化'],
+      ['导入记录总数', String(preview.totalRecords)],
+      ['有效记录数', String(preview.validRecords)],
+      ['无效记录数', String(preview.invalidRecords)],
+      ['将新增的记录数', String(preview.newRecords)],
+      ['重复 ID 数', `${preview.duplicateIds}（将被跳过）`],
+      ['方案数量', `${preview.profileCount}（新增 ${preview.newProfiles}）`],
+      ['将执行的模式', MODE_LABELS[mode]]
+    ];
+    const confirmBtn = h('button', {
+      id: 'backup-confirm',
+      onclick: () => confirmImport()
+    }, '确认导入');
+    const cancelBtn = h('button', {
+      id: 'backup-cancel',
+      class: 'ghost',
+      onclick: () => {
+        resetPreview();
+        fileInput.value = '';
+      }
+    }, '取消');
+    mount(previewBox, h('div', { class: 'card', style: { background: 'var(--panel2)' } }, [
+      h('h3', {}, '导入预览'),
+      ...(preview.errors.length ? [h('div', { class: 'danger-banner' }, preview.errors.join(' '))] : []),
+      h('dl', { class: 'preview-list' }, rows.flatMap(([k, v]) => [h('dt', {}, k), h('dd', {}, v)])),
+      h('div', { class: 'btnrow' }, [confirmBtn, cancelBtn])
+    ]));
+  }
+
+  function confirmImport() {
+    if (importing || !parsed) return;
+    importing = true;
+    try {
+      const snapshot = applyImport(parsed.backup, store.state, modeSelect.value);
+      store.importSnapshot(snapshot);
+      toast('备份导入成功，正在重新加载应用。');
+      setTimeout(() => reload(), 400);
+    } catch (err) {
+      importing = false;
+      showError(err.message || '导入失败，当前数据未被修改。');
+    }
+  }
+
+  function handleFile() {
+    const file = fileInput.files && fileInput.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onerror = () => showError('文件读取失败，请重试。');
+    reader.onload = () => {
+      const result = parseBackup(String(reader.result));
+      if (!result.ok) {
+        parsed = null;
+        showError(result.error);
+        return;
+      }
+      parsed = result;
+      mount(errorBox);
+      renderPreview();
+    };
+    reader.readAsText(file);
+  }
+
+  fileInput.addEventListener('change', handleFile);
+  modeSelect.addEventListener('change', () => renderPreview());
+
+  const exportBtn = h('button', {
+    id: 'backup-export',
+    class: 'ghost',
+    onclick: () => {
+      const backup = store.exportBackup();
+      downloadFile(`fps-sensitivity-backup-${Date.now()}.json`, JSON.stringify(backup, null, 2));
+      toast('完整备份已导出（设置 + 记录 + 方案）。');
+    }
+  }, '导出完整备份');
+
+  return h('div', { id: 'backup-section' }, [
+    h('h3', {}, '备份与恢复'),
+    h('p', { class: 'muted' }, '备份包含当前设置、全部测试记录和灵敏度方案。导入前会显示差异预览，确认后才会写入，失败会自动回滚。'),
+    h('div', { class: 'btnrow' }, [exportBtn, fileInput, modeSelect]),
+    errorBox,
+    previewBox
+  ]);
+}
 
 export function settingsPage({ store }) {
   const s = store.state.settings;
@@ -88,6 +204,7 @@ export function settingsPage({ store }) {
         field('目标速度', speed),
         field('测试难度', diff, '难度影响目标生成频率、尺寸与速度')
       ]),
+      backupSection({ store }),
       h('div', { class: 'btnrow' }, [saveBtn, resetBtn, clearBtn])
     ])
   ]);

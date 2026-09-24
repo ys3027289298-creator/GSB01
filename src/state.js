@@ -1,8 +1,9 @@
 import { makeStorage } from './engine/storage.js';
 import { clampSettings, DEFAULT_SETTINGS } from './engine/settings.js';
+import { buildBackup } from './engine/backup.js';
 
-export function makeStore() {
-  const storage = makeStorage(localStorage);
+export function makeStore(storageBackend) {
+  const storage = makeStorage(storageBackend || localStorage);
   const listeners = new Set();
   const state = {
     ready: false,
@@ -99,6 +100,21 @@ export function makeStore() {
       emit();
     },
     dismissError() {
+      state.dataError = null;
+      emit();
+    },
+    exportBackup() {
+      return buildBackup({
+        settings: state.settings,
+        records: state.records,
+        profiles: state.profiles
+      });
+    },
+    importSnapshot(snapshot) {
+      storage.saveAll(snapshot);
+      state.settings = clampSettings(snapshot.settings);
+      state.records = snapshot.records;
+      state.profiles = snapshot.profiles;
       state.dataError = null;
       emit();
     }

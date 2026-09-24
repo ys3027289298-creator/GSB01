@@ -45,6 +45,28 @@ export function makeStorage(backend = globalThis.localStorage) {
     saveProfiles(profiles) {
       backend.setItem(KEY_PROFILES, JSON.stringify(profiles));
     },
+    saveAll(snapshot) {
+      const previous = {
+        [KEY_SETTINGS]: backend.getItem(KEY_SETTINGS),
+        [KEY_RECORDS]: backend.getItem(KEY_RECORDS),
+        [KEY_PROFILES]: backend.getItem(KEY_PROFILES)
+      };
+      try {
+        backend.setItem(KEY_SETTINGS, JSON.stringify(snapshot.settings));
+        backend.setItem(KEY_RECORDS, JSON.stringify(snapshot.records));
+        backend.setItem(KEY_PROFILES, JSON.stringify(snapshot.profiles));
+      } catch (err) {
+        for (const key of [KEY_SETTINGS, KEY_RECORDS, KEY_PROFILES]) {
+          try {
+            if (previous[key] == null) backend.removeItem(key);
+            else backend.setItem(key, previous[key]);
+          } catch { /* 回滚尽力而为 */ }
+        }
+        const error = new Error('写入本地存储失败，已回滚到导入前的数据，请重试。');
+        error.cause = err;
+        throw error;
+      }
+    },
     clearAll() {
       backend.removeItem(KEY_SETTINGS);
       backend.removeItem(KEY_RECORDS);
