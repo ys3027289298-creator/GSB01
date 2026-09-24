@@ -17,7 +17,11 @@ const NAV = [
   ['compare', '灵敏度对比']
 ];
 
+let disposeCurrentPage = null;
+
 export function renderShell(root, ctx) {
+  disposeCurrentPage?.();
+  disposeCurrentPage = null;
   const { store, router } = ctx;
   const { path } = router.route;
   const fullscreenTest = path === 'test';
@@ -40,7 +44,14 @@ export function renderShell(root, ctx) {
   ]);
 
   const main = h('main', { class: 'main' });
-  const pageCtx = { store, router, main };
+  const pageCtx = {
+    store,
+    router,
+    main,
+    onDispose(fn) {
+      if (typeof fn === 'function') disposeCurrentPage = fn;
+    }
+  };
   const pageMap = {
     home: homePage,
     settings: settingsPage,

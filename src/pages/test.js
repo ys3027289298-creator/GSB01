@@ -58,7 +58,30 @@ export function testPage(ctx) {
   let countdownLeft = 3;
   let countdownTimer = null;
   let finishRecorded = false;
+  let disposed = false;
+  const removers = [];
   const profileName = store.state.profiles.find((p) => p.id === store.state.activeProfile)?.name || '默认';
+
+  function listen(target, event, fn, opts) {
+    target.addEventListener(event, fn, opts);
+    removers.push(() => target.removeEventListener(event, fn, opts));
+  }
+
+  function releasePointerLock() {
+    if (document.pointerLockElement === arena) document.exitPointerLock?.();
+  }
+
+  function dispose() {
+    if (disposed) return;
+    disposed = true;
+    phase = 'disposed';
+    cancelAnimationFrame(rafId);
+    clearTimeout(countdownTimer);
+    if (engine && type === 'recoil') engine.setFiring(false);
+    releasePointerLock();
+    for (const off of removers.splice(0)) off();
+  }
+  ctx.onDispose?.(dispose);
 
   function sizeArena() {
     const rect = arena.getBoundingClientRect();
@@ -93,6 +116,7 @@ export function testPage(ctx) {
   }
 
   function startCountdown() {
+    if (disposed) return;
     engine = makeEngine();
     phase = 'countdown';
     countdownLeft = 3;
@@ -107,7 +131,7 @@ export function testPage(ctx) {
     ]);
     clearTimeout(countdownTimer);
     countdownTimer = setTimeout(function tick() {
-      if (phase !== 'countdown') return;
+      if (disposed || phase !== 'countdown') return;
       countdownLeft -= 1;
       if (countdownLeft <= 0) beginRun();
       else {
@@ -119,6 +143,7 @@ export function testPage(ctx) {
   }
 
   function beginRun() {
+    if (disposed) return;
     removeOverlay();
     phase = 'running';
     pauseBtn.disabled = false;
@@ -135,7 +160,7 @@ export function testPage(ctx) {
   }
 
   function loop(ts) {
-    if (phase !== 'running') return;
+    if (disposed || phase !== 'running') return;
     const engineTs = ts - runStartTs - pausedAccum;
     const dt = ts - lastTs;
     lastTs = ts;
@@ -210,10 +235,11 @@ export function testPage(ctx) {
   }
 
   function pause() {
-    if (phase !== 'running') return;
+    if (disposed || phase !== 'running') return;
     phase = 'paused';
     pauseStart = performance.now();
     cancelAnimationFrame(rafId);
+    if (engine && type === 'recoil') engine.setFiring(false);
     pauseBtn.textContent = '继续';
     statePill.textContent = '已暂停';
     statePill.className = 'pill warn';
@@ -227,7 +253,7 @@ export function testPage(ctx) {
   }
 
   function resume() {
-    if (phase !== 'paused') return;
+    if (disposed || phase !== 'paused') return;
     removeOverlay();
     pausedAccum += performance.now() - pauseStart;
     phase = 'running';
@@ -242,9 +268,11 @@ export function testPage(ctx) {
   }
 
   function restart() {
+    if (disposed) return;
     cancelAnimationFrame(rafId);
     clearTimeout(countdownTimer);
-    if (document.pointerLockElement) document.exitPointerLock();
+    if (engine && type === 'recoil') engine.setFiring(false);
+    releasePointerLock();
     finishRecorded = false;
     arena.querySelectorAll('.target,.crosshair,.trail-dot,.turn-info').forEach((n) => n.remove());
     pauseBtn.disabled = true;
@@ -257,7 +285,7 @@ export function testPage(ctx) {
   }
 
   function finish() {
-    if (finishRecorded) return;
+    if (disposed || finishRecorded) return;
     finishRecorded = true;
     phase = 'over';
     cancelAnimationFrame(rafId);
@@ -265,7 +293,7 @@ export function testPage(ctx) {
     pauseBtn.disabled = true;
     statePill.textContent = '已完成';
     statePill.className = 'pill good';
-    if (document.pointerLockElement) document.exitPointerLock();
+    releasePointerLock();
     const stats = engine.getStats();
     const summary = buildSummary(stats);
     const record = {
@@ -293,7 +321,7 @@ export function testPage(ctx) {
   }
 
   arena.addEventListener('pointerdown', (e) => {
-    if (phase !== 'running') return;
+    if (disposed || phase !== 'running') return;
     if (type === 'click') {
       const rect = arena.getBoundingClientRect();
       const result = engine.handleClick(e.clientX - rect.left, e.clientY - rect.top);
@@ -307,20 +335,22 @@ export function testPage(ctx) {
     }
   });
 
-  document.addEventListener('pointerup', (e) => {
+  listen(document, 'pointerup', (e) => {
+    if (disposed) return;
     if (type === 'recoil' && engine && phase === 'running' && e.button === 0) {
       engine.setFiring(false);
     }
   });
 
-  document.addEventListener('pointerlockerror', () => {
+  listen(document, 'pointerlockerror', () => {
+    if (disposed) return;
     if (phase === 'running' || phase === 'countdown') {
       toast('鼠标锁定失败，请在浏览器地址栏允许指针锁定后重试。', 3200);
     }
   });
 
-  document.addEventListener('mousemove', (e) => {
-    if (phase !== 'running' || document.pointerLockElement !== arena) return;
+  listen(document, 'mousemove', (e) => {
+    if (disposed || phase !== 'running' || document.pointerLockElement !== arena) return;
     if (type === 'turn') {
       engine.addMouseDelta(e.movementX);
     } else if (type === 'tracking') {
@@ -350,16 +380,16 @@ export function testPage(ctx) {
     restart();
   });
   quitBtn.addEventListener('click', () => {
+    if (disposed) return;
     if (phase === 'running' && !confirm('测试进行中，退出将丢失本次结果。确定退出吗？')) return;
-    cancelAnimationFrame(rafId);
-    clearTimeout(countdownTimer);
-    if (document.pointerLockElement) document.exitPointerLock();
+    dispose();
     router.go('select');
   });
 
-  window.addEventListener('beforeunload', (e) => {
+  listen(window, 'beforeunload', (e) => {
+    if (disposed) return;
     if (phase === 'running') { e.preventDefault(); e.returnValue = ''; }
-  }, { once: true });
+  });
 
   showStartOverlay();
   return wrap;
