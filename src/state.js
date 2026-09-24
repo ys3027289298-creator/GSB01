@@ -98,6 +98,14 @@ export function makeStore() {
       state.dataError = null;
       emit();
     },
+    importSnapshot(snapshot) {
+      storage.saveSnapshot(snapshot);
+      state.settings = clampSettings(snapshot.settings);
+      state.records = snapshot.records;
+      state.profiles = snapshot.profiles;
+      state.dataError = null;
+      emit();
+    },
     dismissError() {
       state.dataError = null;
       emit();

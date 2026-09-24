@@ -26,6 +26,23 @@ export function resultPage({ store, router }) {
   }
 
   const { summary, stats, settings } = record;
+  if (!summary) {
+    return h('div', { class: 'wrap' }, [
+      h('div', { class: 'card' }, [
+        h('h2', {}, `${LABELS[record.type] || record.type} · 历史记录`),
+        h('p', { class: 'muted' }, `${new Date(record.createdAt).toLocaleString('zh-CN')} · 该记录来自旧版本备份，缺少评分摘要，仅展示原始数据。`),
+        h('pre', { class: 'muted', style: { whiteSpace: 'pre-wrap', fontSize: '12px' } }, JSON.stringify(record.stats, null, 2)),
+        h('div', { class: 'btnrow' }, [
+          h('button', { class: 'ghost', onclick: () => router.go('records') }, '返回记录'),
+          h('button', { class: 'danger', onclick: () => {
+            if (!confirm('删除这条测试记录？')) return;
+            store.deleteRecord(record.id);
+            router.go('records');
+          } }, '删除记录')
+        ])
+      ])
+    ]);
+  }
   const metrics = metricDefs(record);
   const ringColor = summary.score >= 85 ? '#37d399' : summary.score >= 55 ? '#4da3ff' : '#ff5c7a';
 

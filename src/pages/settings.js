@@ -1,6 +1,13 @@
 import { h } from '../dom.js';
-import { toast } from '../dom.js';
+import { toast, downloadFile } from '../dom.js';
 import { ASPECTS, DEFAULT_SETTINGS } from '../engine/settings.js';
+import {
+  createBackup,
+  parseBackup,
+  validateBackup,
+  computePreview,
+  applyImport
+} from '../engine/backup.js';
 
 export function settingsPage({ store }) {
   const s = store.state.settings;
@@ -68,6 +75,8 @@ export function settingsPage({ store }) {
       ])
     : null;
 
+  const backupSection = buildBackupSection({ store });
+
   return h('div', { class: 'wrap' }, [
     errorBanner,
     h('div', { class: 'card' }, [
@@ -89,6 +98,152 @@ export function settingsPage({ store }) {
         field('测试难度', diff, '难度影响目标生成频率、尺寸与速度')
       ]),
       h('div', { class: 'btnrow' }, [saveBtn, resetBtn, clearBtn])
-    ])
+    ]),
+    backupSection
   ]);
+}
+
+function buildBackupSection({ store }) {
+  let pending = null;
+  let committing = false;
+
+  const previewBox = h('div', { id: 'backup-preview', style: { marginTop: '12px' } }, [
+    h('p', { class: 'muted' }, '选择备份文件后，这里会显示差异预览，确认前不会修改任何数据。')
+  ]);
+
+  const modeSelect = h('select', { id: 'backup-mode' }, [
+    h('option', { value: 'replace' }, '替换全部（用备份覆盖当前设置、记录和方案）'),
+    h('option', { value: 'merge' }, '合并新增（保留当前设置，只追加新记录和新方案）')
+  ]);
+  modeSelect.addEventListener('change', () => renderPreview());
+
+  const exportBtn = h('button', {
+    id: 'backup-export',
+    onclick: () => {
+      const backup = createBackup({
+        settings: store.state.settings,
+        records: store.state.records,
+        profiles: store.state.profiles
+      });
+      downloadFile(`fps-sensitivity-backup-${Date.now()}.json`, JSON.stringify(backup, null, 2));
+      toast('完整备份已导出（设置 + 记录 + 方案）。');
+    }
+  }, '导出完整备份');
+
+  const fileInput = h('input', { type: 'file', accept: 'application/json,.json', id: 'backup-file' });
+  fileInput.addEventListener('change', async () => {
+    const file = fileInput.files && fileInput.files[0];
+    if (!file) return;
+    let text;
+    try {
+      text = await readFileText(file);
+    } catch {
+      showError('无法读取所选文件。');
+      return;
+    }
+    const parsed = parseBackup(text);
+    if (!parsed.ok) {
+      pending = null;
+      showError(parsed.error);
+      return;
+    }
+    const validation = validateBackup(parsed.backup);
+    if (!validation.ok) {
+      pending = null;
+      const first = validation.settings.error || validation.records.error || validation.profiles.error;
+      showError(`备份校验失败：${first}`);
+      return;
+    }
+    pending = { backup: parsed.backup, validation };
+    renderPreview();
+  });
+
+  function showError(message) {
+    previewBox.replaceChildren(h('p', { class: 'danger-banner', id: 'backup-error' }, message));
+  }
+
+  function renderPreview() {
+    if (!pending) return;
+    const mode = modeSelect.value;
+    const preview = computePreview(pending.backup, pending.validation, store.state, mode);
+    const rows = [
+      ['文件版本', `v${preview.version}${preview.migrated ? '（已从旧版本迁移）' : ''}`],
+      ['导出时间', preview.exportedAt ? new Date(preview.exportedAt).toLocaleString('zh-CN') : '未知'],
+      ['执行模式', mode === 'replace' ? '替换全部' : '合并新增'],
+      ['设置变化', preview.settingsChanged ? '有变化，导入后生效' : (mode === 'merge' ? '合并模式保留当前设置' : '无变化')],
+      ['记录总数', String(preview.totalRecords)],
+      ['有效记录', String(preview.validRecords)],
+      ['无效记录（将被跳过）', String(preview.invalidRecords)],
+      ['将新增记录', String(preview.newRecords)],
+      ['重复 ID（将被跳过）', String(preview.duplicateRecordIds)],
+      ['方案数量', `${preview.profileCount} 个（新增 ${preview.newProfiles}，重复 ${preview.duplicateProfileIds}）`]
+    ];
+    previewBox.replaceChildren(
+      h('div', { class: 'card', style: { background: 'var(--panel2)', marginTop: '0' } }, [
+        h('h3', {}, '导入预览（确认前不会修改数据）'),
+        h('dl', { class: 'grid grid-2' }, rows.map(([k, v]) =>
+          h('div', {}, [h('dt', { class: 'muted', style: { fontSize: '12px' } }, k), h('dd', { style: { margin: '2px 0 0' } }, v)])
+        )),
+        h('div', { class: 'btnrow' }, [
+          h('button', {
+            id: 'backup-confirm',
+            onclick: () => confirmImport()
+          }, '确认导入'),
+          h('button', {
+            class: 'ghost',
+            id: 'backup-cancel',
+            onclick: () => {
+              pending = null;
+              fileInput.value = '';
+              previewBox.replaceChildren(h('p', { class: 'muted' }, '已取消导入，当前数据未改动。'));
+            }
+          }, '取消')
+        ])
+      ])
+    );
+  }
+
+  function confirmImport() {
+    if (!pending || committing) return;
+    committing = true;
+    const snapshot = applyImport(pending.validation, store.state, modeSelect.value);
+    try {
+      store.importSnapshot(snapshot);
+    } catch (err) {
+      committing = false;
+      showError(err.message || '导入失败，已回滚到导入前的数据。');
+      return;
+    }
+    toast('备份已导入，正在重新加载应用…');
+    setTimeout(() => location.reload(), 500);
+  }
+
+  return h('div', { class: 'card' }, [
+    h('h2', {}, '备份与恢复'),
+    h('p', { class: 'muted' }, '导出包含设置、全部测试记录和灵敏度方案的完整备份；导入前会校验并预览差异，确认后才会写入，失败自动回滚。'),
+    h('div', { class: 'btnrow' }, [exportBtn]),
+    h('div', { class: 'grid grid-2', style: { marginTop: '12px' } }, [
+      h('label', { class: 'field' }, ['选择备份文件', fileInput]),
+      h('label', { class: 'field' }, ['导入模式', modeSelect])
+    ]),
+    previewBox
+  ]);
+}
+
+function readFileText(file) {
+  if (typeof file.text === 'function') {
+    return Promise.resolve()
+      .then(() => file.text())
+      .catch(() => readWithFileReader(file));
+  }
+  return readWithFileReader(file);
+}
+
+function readWithFileReader(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result));
+    reader.onerror = () => reject(reader.error || new Error('read failed'));
+    reader.readAsText(file);
+  });
 }
